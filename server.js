@@ -1,18 +1,27 @@
+const crypto = require('crypto');
+if (!global.crypto) {
+    global.crypto = crypto;
+}
+
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const QRCode = require('qrcode');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
 
 let qrCodeData = '';
 let isConnected = false;
+let groupList = [];
 
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const authFolder = 'auth_info_baileys';
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
     
     const sock = makeWASocket({
-        auth: state
+        auth: state,
+        printQRInTerminal: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -21,40 +30,109 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
+            console.log('QR Code Baru Diterima!');
             qrCodeData = await QRCode.toDataURL(qr);
             isConnected = false;
         }
 
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            if (shouldReconnect) {
-                connectToWhatsApp();
+            const statusCode = lastDisconnect.error?.output?.statusCode;
+            console.log('Koneksi terputus dengan status code:', statusCode);
+            
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                console.log('Sesi tidak valid, menghapus folder auth...');
+                if (fs.existsSync(authFolder)) {
+                    fs.rmSync(authFolder, { recursive: true, force: true });
+                }
             }
+            
+            setTimeout(() => {
+                connectToWhatsApp();
+            }, 3000);
+
         } else if (connection === 'open') {
             console.log('WhatsApp Bot Terhubung & Siap!');
             isConnected = true;
             qrCodeData = '';
+
+            try {
+                const groups = await sock.groupFetchAllParticipating();
+                groupList = Object.values(groups).map(g => ({
+                    id: g.id,
+                    subject: g.subject
+                }));
+            } catch (err) {
+                console.error('Gagal mengambil daftar grup:', err);
+            }
         }
     });
 
-    app.post('/send-piket', async (req, res) => {
-        const { nomor, nama, hari, tugas } = req.body;
+    function formatTarget(target) {
+        let destinationId = target.trim();
+        if (!destinationId.includes('@g.us')) {
+            let formattedNumber = destinationId.replace(/\D/g, '');
+            if (formattedNumber.startsWith('0')) {
+                formattedNumber = '62' + formattedNumber.slice(1);
+            }
+            destinationId = `${formattedNumber}@s.whatsapp.net`;
+        }
+        return destinationId;
+    }
 
-        if (!nomor || !nama || !hari) {
-            return res.status(400).json({ status: false, message: 'Data nomor, nama, dan hari wajib diisi!' });
+    app.post('/send-jadwal-piket', async (req, res) => {
+        const { target, kelas, sekolah, hari_tanggal, daftar_siswa } = req.body;
+
+        if (!target || !kelas || !daftar_siswa) {
+            return res.status(400).json({ status: false, message: 'Data target, kelas, dan daftar_siswa wajib diisi!' });
         }
 
-        let formattedNumber = nomor.replace(/\D/g, '');
-        if (formattedNumber.startsWith('0')) {
-            formattedNumber = '62' + formattedNumber.slice(1);
-        }
-        const id = `${formattedNumber}@s.whatsapp.net`;
+        const destinationId = formatTarget(target);
+        const listSiswa = Array.isArray(daftar_siswa) 
+            ? daftar_siswa.map((nama, idx) => `${idx + 1}. ${nama}`).join('\n')
+            : daftar_siswa;
 
-        const message = `Halo *${nama}*,\n\nIni pengingat *Jadwal Piket* untuk hari *${hari}*.\n*Tugas:* ${tugas || 'Menjaga kebersihan'}.\n\nMohon dilaksanakan ya. Terima kasih!`;
+        const message = `🔔 *PENGINGAT JADWAL PIKET HARI INI* 🔔\n` +
+                        `Kelas *${kelas}* - *${sekolah || 'SMA Negeri Rancakalong'}*\n` +
+                        `Hari/Tanggal: *${hari_tanggal}*\n\n` +
+                        `Berikut adalah nama-nama siswa yang bertugas piket hari ini:\n\n` +
+                        `${listSiswa}\n\n` +
+                        `Mohon bantuannya untuk mengingatkan para siswa. Semangat! 💪✨`;
 
         try {
-            await sock.sendMessage(id, { text: message });
-            res.status(200).json({ status: true, message: `Pesan terkirim ke ${nama}` });
+            await sock.sendMessage(destinationId, { text: message });
+            res.status(200).json({ status: true, message: `Jadwal piket berhasil dikirim ke ${kelas}` });
+        } catch (error) {
+            res.status(500).json({ status: false, message: 'Gagal mengirim pesan', error: error.toString() });
+        }
+    });
+
+    app.post('/send-tidak-piket', async (req, res) => {
+        const { target, kelas, sekolah, hari_tanggal, daftar_siswa_tidak_piket } = req.body;
+
+        if (!target || !kelas || !daftar_siswa_tidak_piket) {
+            return res.status(400).json({ status: false, message: 'Data target, kelas, dan daftar_siswa_tidak_piket wajib diisi!' });
+        }
+
+        const destinationId = formatTarget(target);
+        const listSiswa = Array.isArray(daftar_siswa_tidak_piket)
+            ? daftar_siswa_tidak_piket.map((item, idx) => {
+                if (typeof item === 'object') {
+                    return `${idx + 1}. ${item.nama} *(Keterangan: ${item.keterangan || 'Hadir'})*`;
+                }
+                return `${idx + 1}. ${item} *(Keterangan: Hadir)*`;
+            }).join('\n')
+            : daftar_siswa_tidak_piket;
+
+        const message = `Halo Ibu/Bapak Wali Kelas / Anggota Kelas *${kelas}*,\n` +
+                        `*${sekolah || 'SMA Negeri Rancakalong'}*\n\n` +
+                        `Perkenalkan saya Admin, izin menginformasikan bahwa pada hari *${hari_tanggal}* berikut siswa kelas yang tidak menjalankan piket:\n\n` +
+                        `${listSiswa}\n\n` +
+                        `Mohon bantuan dan arahannya, akan diberlakukan denda sesuai ketentuan kelas masing-masing.\n\n` +
+                        `Terima kasih atas perhatian dan kerja samanya. 🙏`;
+
+        try {
+            await sock.sendMessage(destinationId, { text: message });
+            res.status(200).json({ status: true, message: `Laporan tidak piket berhasil dikirim ke ${kelas}` });
         } catch (error) {
             res.status(500).json({ status: false, message: 'Gagal mengirim pesan', error: error.toString() });
         }
@@ -63,11 +141,23 @@ async function connectToWhatsApp() {
 
 app.get('/', (req, res) => {
     if (isConnected) {
-        return res.send('<h1>WhatsApp Bot Terhubung & Siap!</h1>');
+        let groupsHtml = '<h3>Daftar Grup WA Terhubung:</h3><ul>';
+        if (groupList.length > 0) {
+            groupList.forEach(g => {
+                groupsHtml += `<li><b>Nama Grup:</b> ${g.subject} <br> <b>ID Grup:</b> <code>${g.id}</code></li><br>`;
+            });
+        } else {
+            groupsHtml += '<li>Belum ada grup yang terhubung atau pastikan nomor bot sudah dimasukkan ke grup.</li>';
+        }
+        groupsHtml += '</ul>';
+
+        return res.send(`<h1>WhatsApp Bot Terhubung & Siap!</h1>${groupsHtml}`);
     }
+    
     if (qrCodeData) {
         return res.send(`<h1>Scan QR Code untuk Login WhatsApp</h1><br><img src="${qrCodeData}" /><p>Silakan scan menggunakan WhatsApp di HP kamu.</p>`);
     }
+    
     res.send('<h1>Sedang menyiapkan QR Code, silakan muat ulang halaman beberapa detik lagi...</h1>');
 });
 
