@@ -1,17 +1,16 @@
 {
   "name": "bot-piket-wa",
   "version": "1.0.0",
-  "description": "Bot Whatsapp Piket",
   "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.8",
-    "express": "^4.19.2",
+    "@whiskeysockets/baileys": "^6.5.0",
+    "express": "^4.18.2",
     "qrcode": "^1.5.3"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
