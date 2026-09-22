@@ -1,6 +1,13 @@
+// Patch crypto wajib di baris paling atas
+const crypto = require('crypto');
+if (!global.crypto) {
+    global.crypto = crypto.webcrypto || crypto;
+}
+
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -8,9 +15,10 @@ app.use(express.json());
 let sock = null;
 let isConnected = false;
 let groupList = [];
+const authFolder = 'auth_info_baileys';
 
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
     sock = makeWASocket({
         auth: state,
@@ -25,11 +33,18 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log('Koneksi terputus, mencoba hubungkan ulang...', statusCode);
+            console.log('Koneksi terputus dengan status code:', statusCode);
             isConnected = false;
+
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                if (fs.existsSync(authFolder)) {
+                    fs.rmSync(authFolder, { recursive: true, force: true });
+                }
+            }
+
             setTimeout(connectToWhatsApp, 3000);
         } else if (connection === 'open') {
-            console.log('WhatsApp Bot Terhubung & Siap!');
+            console.log('WhatsApp Bot Terhubung!');
             isConnected = true;
 
             try {
@@ -43,74 +58,74 @@ async function connectToWhatsApp() {
             }
         }
     });
-
-    function formatTarget(target) {
-        let destinationId = target.trim();
-        if (!destinationId.includes('@g.us')) {
-            let formattedNumber = destinationId.replace(/\D/g, '');
-            if (formattedNumber.startsWith('0')) {
-                formattedNumber = '62' + formattedNumber.slice(1);
-            }
-            destinationId = `${formattedNumber}@s.whatsapp.net`;
-        }
-        return destinationId;
-    }
-
-    app.post('/send-jadwal-piket', async (req, res) => {
-        const { target, kelas, sekolah, hari_tanggal, daftar_siswa } = req.body;
-        if (!target || !kelas || !daftar_siswa) {
-            return res.status(400).json({ status: false, message: 'Data target, kelas, dan daftar_siswa wajib diisi!' });
-        }
-        const destinationId = formatTarget(target);
-        const listSiswa = Array.isArray(daftar_siswa) 
-            ? daftar_siswa.map((nama, idx) => `${idx + 1}. ${nama}`).join('\n')
-            : daftar_siswa;
-
-        const message = `🔔 *PENGINGAT JADWAL PIKET HARI INI* 🔔\n` +
-                        `Kelas *${kelas}* - *${sekolah || 'SMA Negeri Rancakalong'}*\n` +
-                        `Hari/Tanggal: *${hari_tanggal}*\n\n` +
-                        `Berikut adalah nama-nama siswa yang bertugas piket hari ini:\n\n` +
-                        `${listSiswa}\n\n` +
-                        `Mohon bantuannya untuk mengingatkan para siswa. Semangat! 💪✨`;
-
-        try {
-            await sock.sendMessage(destinationId, { text: message });
-            res.status(200).json({ status: true, message: `Jadwal piket berhasil dikirim ke ${kelas}` });
-        } catch (error) {
-            res.status(500).json({ status: false, message: 'Gagal mengirim pesan', error: error.toString() });
-        }
-    });
-
-    app.post('/send-tidak-piket', async (req, res) => {
-        const { target, kelas, sekolah, hari_tanggal, daftar_siswa_tidak_piket } = req.body;
-        if (!target || !kelas || !daftar_siswa_tidak_piket) {
-            return res.status(400).json({ status: false, message: 'Data target, kelas, dan daftar_siswa_tidak_piket wajib diisi!' });
-        }
-        const destinationId = formatTarget(target);
-        const listSiswa = Array.isArray(daftar_siswa_tidak_piket)
-            ? daftar_siswa_tidak_piket.map((item, idx) => {
-                if (typeof item === 'object') {
-                    return `${idx + 1}. ${item.nama} *(Keterangan: ${item.keterangan || 'Hadir'})*`;
-                }
-                return `${idx + 1}. ${item} *(Keterangan: Hadir)*`;
-            }).join('\n')
-            : daftar_siswa_tidak_piket;
-
-        const message = `Halo Ibu/Bapak Wali Kelas / Anggota Kelas *${kelas}*,\n` +
-                        `*${sekolah || 'SMA Negeri Rancakalong'}*\n\n` +
-                        `Perkenalkan saya Admin, izin menginformasikan bahwa pada hari *${hari_tanggal}* berikut siswa kelas yang tidak menjalankan piket:\n\n` +
-                        `${listSiswa}\n\n` +
-                        `Mohon bantuan dan arahannya, akan diberlakukan denda sesuai ketentuan kelas masing-masing.\n\n` +
-                        `Terima kasih atas perhatian dan kerja samanya. 🙏`;
-
-        try {
-            await sock.sendMessage(destinationId, { text: message });
-            res.status(200).json({ status: true, message: `Laporan tidak piket berhasil dikirim ke ${kelas}` });
-        } catch (error) {
-            res.status(500).json({ status: false, message: 'Gagal mengirim pesan', error: error.toString() });
-        }
-    });
 }
+
+function formatTarget(target) {
+    let destinationId = target.trim();
+    if (!destinationId.includes('@g.us')) {
+        let formattedNumber = destinationId.replace(/\D/g, '');
+        if (formattedNumber.startsWith('0')) {
+            formattedNumber = '62' + formattedNumber.slice(1);
+        }
+        destinationId = `${formattedNumber}@s.whatsapp.net`;
+    }
+    return destinationId;
+}
+
+app.post('/send-jadwal-piket', async (req, res) => {
+    const { target, kelas, sekolah, hari_tanggal, daftar_siswa } = req.body;
+    if (!target || !kelas || !daftar_siswa) {
+        return res.status(400).json({ status: false, message: 'Data target, kelas, dan daftar_siswa wajib diisi!' });
+    }
+    const destinationId = formatTarget(target);
+    const listSiswa = Array.isArray(daftar_siswa) 
+        ? daftar_siswa.map((nama, idx) => `${idx + 1}. ${nama}`).join('\n')
+        : daftar_siswa;
+
+    const message = `🔔 *PENGINGAT JADWAL PIKET HARI INI* 🔔\n` +
+                    `Kelas *${kelas}* - *${sekolah || 'SMA Negeri Rancakalong'}*\n` +
+                    `Hari/Tanggal: *${hari_tanggal}*\n\n` +
+                    `Berikut adalah nama-nama siswa yang bertugas piket hari ini:\n\n` +
+                    `${listSiswa}\n\n` +
+                    `Mohon bantuannya untuk mengingatkan para siswa. Semangat! 💪✨`;
+
+    try {
+        await sock.sendMessage(destinationId, { text: message });
+        res.status(200).json({ status: true, message: `Jadwal piket berhasil dikirim ke ${kelas}` });
+    } catch (error) {
+        res.status(500).json({ status: false, message: 'Gagal mengirim pesan', error: error.toString() });
+    }
+});
+
+app.post('/send-tidak-piket', async (req, res) => {
+    const { target, kelas, sekolah, hari_tanggal, daftar_siswa_tidak_piket } = req.body;
+    if (!target || !kelas || !daftar_siswa_tidak_piket) {
+        return res.status(400).json({ status: false, message: 'Data target, kelas, dan daftar_siswa_tidak_piket wajib diisi!' });
+    }
+    const destinationId = formatTarget(target);
+    const listSiswa = Array.isArray(daftar_siswa_tidak_piket)
+        ? daftar_siswa_tidak_piket.map((item, idx) => {
+            if (typeof item === 'object') {
+                return `${idx + 1}. ${item.nama} *(Keterangan: ${item.keterangan || 'Hadir'})*`;
+            }
+            return `${idx + 1}. ${item} *(Keterangan: Hadir)*`;
+        }).join('\n')
+        : daftar_siswa_tidak_piket;
+
+    const message = `Halo Ibu/Bapak Wali Kelas / Anggota Kelas *${kelas}*,\n` +
+                    `*${sekolah || 'SMA Negeri Rancakalong'}*\n\n` +
+                    `Perkenalkan saya Admin, izin menginformasikan bahwa pada hari *${hari_tanggal}* berikut siswa kelas yang tidak menjalankan piket:\n\n` +
+                    `${listSiswa}\n\n` +
+                    `Mohon bantuan dan arahannya, akan diberlakukan denda sesuai ketentuan kelas masing-masing.\n\n` +
+                    `Terima kasih atas perhatian dan kerja samanya. 🙏`;
+
+    try {
+        await sock.sendMessage(destinationId, { text: message });
+        res.status(200).json({ status: true, message: `Laporan tidak piket berhasil dikirim ke ${kelas}` });
+    } catch (error) {
+        res.status(500).json({ status: false, message: 'Gagal mengirim pesan', error: error.toString() });
+    }
+});
 
 app.get('/pair', async (req, res) => {
     const phone = req.query.phone;
@@ -135,21 +150,19 @@ app.get('/pair', async (req, res) => {
             formattedPhone = '62' + formattedPhone.slice(1);
         }
 
-        setTimeout(async () => {
-            try {
-                const code = await sock.requestPairingCode(formattedPhone);
-                res.send(`
-                    <h2>Kode Pairing WhatsApp Kamu:</h2>
-                    <h1 style="color:blue; font-size:40px;">${code}</h1>
-                    <p>Buka WA di HP -> Titik 3 -> Perangkat Tertaut -> Tautkan Perangkat -> Tautkan dengan nomor telepon saja -> Masukkan kode ini.</p>
-                    <br><a href="/">Cek Status / Lihat ID Grup</a>
-                `);
-            } catch (err) {
-                res.send(`<h3>Gagal dapat kode: ${err.message}</h3><a href="/pair">Coba Lagi</a>`);
-            }
-        }, 1500);
-    } catch (e) {
-        res.send(`<h3>Error: ${e.message}</h3>`);
+        if (!sock) {
+            return res.send('<h3>Sistem sedang menyiapkan koneksi, silakan refresh halaman ini lalu coba lagi.</h3>');
+        }
+
+        const code = await sock.requestPairingCode(formattedPhone);
+        res.send(`
+            <h2>Kode Pairing WhatsApp Kamu:</h2>
+            <h1 style="color:blue; font-size:40px; letter-spacing:4px;">${code}</h1>
+            <p>Buka WA di HP -> Titik 3 -> Perangkat Tertaut -> Tautkan Perangkat -> Tautkan dengan nomor telepon saja -> Masukkan kode ini.</p>
+            <br><a href="/">Cek Status / Lihat ID Grup</a>
+        `);
+    } catch (err) {
+        res.send(`<h3>Gagal dapat kode: ${err.message}</h3><p>Pastikan nomor HP benar dan aktif di WhatsApp.</p><a href="/pair">Coba Lagi</a>`);
     }
 });
 
